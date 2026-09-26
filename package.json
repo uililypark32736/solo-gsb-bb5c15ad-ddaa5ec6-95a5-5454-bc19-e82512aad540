@@ -1,0 +1,13 @@
+{
+  "name": "interview-anonymizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "访谈稿匿名化映射编辑器",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>访谈稿匿名化映射编辑器</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>访谈稿匿名化映射编辑器</h1>
+    <div class="topbar-actions">
+      <button id="btnExample" class="btn">加载内置示例</button>
+      <button id="btnUndo" class="btn" disabled>撤销最近操作</button>
+      <button id="btnCopy" class="btn" disabled>复制匿名预览</button>
+      <button id="btnResetText" class="btn btn-ghost hidden">重新粘贴原稿</button>
+    </div>
+  </header>
+
+  <!-- 第一步：粘贴原稿 -->
+  <section id="inputSection" class="card input-section">
+    <h2>第一步：粘贴访谈原稿</h2>
+    <textarea id="textInput" placeholder="把访谈原稿粘贴到这里……"></textarea>
+    <div class="row">
+      <button id="btnLoadText" class="btn btn-primary">加载原稿，开始匿名化</button>
+    </div>
+  </section>
+
+  <!-- 第二步：编辑区 -->
+  <main id="editorSection" class="hidden">
+    <div class="panes">
+      <section class="card pane">
+        <h2>原稿 <span class="hint">（用鼠标框选片段可指派给人物，也可批量指派全文相同片段；原稿内容不会被改动）</span></h2>
+        <div id="originalView" class="view" data-side="original"></div>
+      </section>
+
+      <section class="card pane">
+        <h2>匿名预览 <span class="hint">（点击任一侧的高亮片段，可定位另一侧对应位置）</span></h2>
+        <div id="previewView" class="view" data-side="preview"></div>
+      </section>
+
+      <aside class="card sidebar">
+        <h2>人物规则</h2>
+        <form id="personForm" autocomplete="off">
+          <input id="codenameInput" placeholder="统一代号，如：受访者A" required>
+          <input id="aliasesInput" placeholder="称呼，多个用逗号分隔，如：张敏, 张姐">
+          <button type="submit" class="btn btn-primary">添加人物</button>
+        </form>
+        <ul id="personList" class="person-list"></ul>
+
+        <h2 class="sub-title">敏感信息巡检</h2>
+        <div class="hint sub-hint">离线扫描原稿中的手机号、邮箱与 18 位身份证号（身份证校验出生日期与校验位；重叠时身份证＞邮箱＞手机号，同类更长优先）。状态随规则、框选与例外实时重算。</div>
+        <div id="inspectFilters" class="inspect-filters"></div>
+        <ul id="inspectList" class="inspect-list"></ul>
+
+        <h2 class="sub-title">保留原文例外</h2>
+        <div class="hint sub-hint">在映射表把称呼命中标为「保留原文」：例外区间内原文照录，并屏蔽重叠的自动称呼命中；显式框选仍可覆盖例外。</div>
+        <ul id="exceptionList" class="exception-list">
+          <li class="exception-empty">（暂无例外，去映射表标记称呼命中吧）</li>
+        </ul>
+
+        <div class="legend">
+          <div><span class="chip chip-alias"></span> 称呼命中（最长称呼优先）</div>
+          <div><span class="chip chip-explicit"></span> 显式框选（优先级最高）</div>
+          <div><span class="chip chip-keep"></span> 保留原文例外（可被框选覆盖）</div>
+          <div><span class="chip chip-leak"></span> 巡检：仍泄漏　<span class="chip chip-kept"></span> 保留原文　<span class="chip chip-anon"></span> 已匿名</div>
+        </div>
+        <div id="stats" class="stats"></div>
+      </aside>
+    </div>
+
+    <section class="card">
+      <h2 id="mappingTitle">字符区间映射表（原稿 ↔ 预览）<span class="hint">（「保留原文」可把称呼命中标为例外；点击行可定位原稿与预览对应位置）</span></h2>
+      <div class="mapping-wrap">
+        <table id="mappingTable">
+          <thead>
+            <tr><th>#</th><th>人物</th><th>来源</th><th>原稿区间</th><th>原稿片段</th><th>预览区间</th><th>预览片段</th><th>操作</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 id="citationTitle">引文列表 <span class="hint">（在原稿框选后于弹窗点「加入引文」；按添加顺序排列，可删除；人物规则、框选、例外、撤销变化后引文实时重算，重新加载原稿时清空）</span></h2>
+      <div class="citation-bar">
+        <span id="citationCount" class="citation-count">共 0 条</span>
+        <button id="btnDownloadCitations" class="btn" disabled>下载引文 TXT（UTF-8，空行分隔）</button>
+      </div>
+      <ol id="citationList" class="citation-list"></ol>
+    </section>
+  </main>
+
+  <!-- 框选后弹出的指派面板 -->
+  <div id="selPopup" class="popup hidden">
+    <div class="popup-title">将所选片段指派给</div>
+    <select id="popupPerson"></select>
+    <div id="popupNewFields" class="hidden">
+      <input id="popupCodename" placeholder="统一代号，如：受访者A">
+      <input id="popupAlias" placeholder="登记称呼（留空则仅此一处生效）">
+    </div>
+    <button id="popupBatch" class="btn" title="把全文中与所选片段完全相同的所有片段统一指派给该人物（可撤销）">批量指派全文相同片段…</button>
+    <button id="popupCitation" class="btn" title="把当前框选的非空区间存为一条引文：引文按最终匿名映射实时生成，与是否指派人物无关；多条引文可重叠">加入引文</button>
+    <div class="popup-actions">
+      <button id="popupOk" class="btn btn-primary">确定</button>
+      <button id="popupCancel" class="btn">取消</button>
+    </div>
+  </div>
+
+  <!-- 批量同文片段指派确认弹窗 -->
+  <div id="batchDialog" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-title">批量同文片段指派</div>
+      <div class="merge-preview">
+        <div id="batchFrag" class="batch-frag"></div>
+        <div id="batchTarget" class="batch-target"></div>
+        <div class="batch-counts">
+          <div id="batchTotal"></div>
+          <div id="batchOk" class="batch-ok"></div>
+          <div id="batchClashSel" class="batch-clash-sel"></div>
+          <div id="batchClashEx" class="batch-clash-ex"></div>
+        </div>
+        <div class="batch-note">仅新增「可处理」区间为显式框选；冲突匹配一律跳过，不覆盖原有区间。整批作为一条撤销记录。</div>
+      </div>
+      <div class="modal-actions">
+        <button id="batchConfirm" class="btn btn-primary">确认批量指派（可撤销）</button>
+        <button id="batchCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 合并人物确认弹窗 -->
+  <div id="mergeDialog" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-title">合并人物</div>
+      <div class="merge-row">
+        <span class="merge-label">目标人物（保留）</span>
+        <span id="mergeTarget" class="merge-target"></span>
+      </div>
+      <div class="merge-row">
+        <span class="merge-label">源人物（并入后删除）</span>
+        <select id="mergeSource"></select>
+      </div>
+      <div class="merge-preview">
+        <div id="mergeCodenames" class="merge-codenames"></div>
+        <div id="mergeAliases" class="merge-aliases"></div>
+        <div id="mergeCounts" class="merge-counts"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="mergeConfirm" class="btn btn-primary">确认合并（可撤销）</button>
+        <button id="mergeCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="anonymize.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
