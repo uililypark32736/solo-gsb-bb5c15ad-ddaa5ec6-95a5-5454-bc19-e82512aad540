@@ -5,7 +5,10 @@
  * 2. 保留原文例外：按原稿字符区间记录，区间内（扣除被显式框选覆盖的部分）原文照录，
  *    并屏蔽与之重叠的所有自动称呼命中；
  * 3. 最长称呼优先：称呼命中之间重叠时，更长者优先，长度相同则位置靠前者优先；
- * 4. 原稿不被改动：仅生成预览文本与双向字符区间映射。
+ * 4. 共享称呼裁决：同一称呼被多位人物登记时，只有经 adjudications 裁决给唯一归属人物
+ *    的称呼才产生自动命中；未裁决（或裁决已失效）的共享称呼一律不参与自动替换，
+ *    不再由人物列表顺序暗中决定代号；
+ * 5. 原稿不被改动：仅生成预览文本与双向字符区间映射。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -41,19 +44,44 @@
   }
 
   /**
+   * 统计每个称呼当前登记在哪些人物名下（同一人物重复登记同一称呼只计一次）。
+   * 结果保留称呼首次登记的出现顺序（按人物顺序、人物内称呼顺序）。
+   *
+   * @param {Array} persons [{ id, aliases: [] }]
+   * @returns {Object} { [alias]: personId[] }
+   */
+  function aliasOwners(persons) {
+    var owners = {};
+    (persons || []).forEach(function (p) {
+      (p.aliases || []).forEach(function (alias) {
+        if (!alias) return;
+        if (!owners[alias]) owners[alias] = [];
+        if (owners[alias].indexOf(p.id) === -1) owners[alias].push(p.id);
+      });
+    });
+    return owners;
+  }
+
+  /**
    * @param {string} text 原稿
    * @param {Array} persons [{ id, codename, aliases: [] }]
    * @param {Array} selections [{ start, end, personId }] 显式框选（最高优先级）
    * @param {Array} exceptions [{ id, start, end, personId }] 保留原文例外（来源人物）
+   * @param {Object} [adjudications] 共享称呼裁决 { [alias]: personId }：
+   *   仅当称呼同时登记在多位人物名下且裁决给其中一位时，该称呼才产生自动命中；
+   *   未裁决或裁决给非候选人物（已删除 / 已合并）的称呼不参与自动替换。
+   *   仅属于一位人物的称呼无需裁决，照常自动命中。
    * @returns {{ preview: string, map: Array }} 预览文本与双向区间映射
    *   map 项: { id, kind:'replace'|'keep', oStart, oEnd, pStart, pEnd,
    *             personId, explicit, exId }
    */
-  function anonymize(text, persons, selections, exceptions) {
+  function anonymize(text, persons, selections, exceptions, adjudications) {
     selections = selections || [];
     exceptions = exceptions || [];
+    adjudications = adjudications || {};
     var byId = {};
     persons.forEach(function (p) { byId[p.id] = p; });
+    var owners = aliasOwners(persons);
 
     var claimed = []; // 已被占用的字符区间 [[s,e),...]
     var reps = [];    // 最终替换项
@@ -79,10 +107,14 @@
     });
 
     // 3) 收集所有称呼命中
+    //    共享称呼（登记在多位人物名下）必须经裁决归属于唯一候选人物后才产生命中；
+    //    未裁决或裁决失效的共享称呼不参与自动替换，不由人物列表顺序暗中决定代号。
     var hits = [];
     persons.forEach(function (p) {
       p.aliases.forEach(function (alias) {
         if (!alias) return;
+        var ownerIds = owners[alias] || [p.id];
+        if (ownerIds.length > 1 && adjudications[alias] !== p.id) return;
         var i = text.indexOf(alias);
         while (i !== -1) {
           hits.push({ start: i, end: i + alias.length, personId: p.id });
@@ -344,6 +376,7 @@
 
   return {
     anonymize: anonymize,
+    aliasOwners: aliasOwners,
     buildCitation: buildCitation,
     planBatchAssign: planBatchAssign,
     detectSensitive: detectSensitive,

@@ -48,6 +48,12 @@
         </form>
         <ul id="personList" class="person-list"></ul>
 
+        <h2 class="sub-title">共享称呼裁决</h2>
+        <div class="hint sub-hint">同一称呼登记在多位人物名下时在此裁决归属：列出冲突称呼、候选人物与原稿命中数。<b>未裁决的称呼不参与自动替换</b>（不再由人物列表顺序暗中决定代号）；选定后其自动命中按最长称呼、框选与保留例外优先级进入预览。人物删除或合并后失效裁决自动清除，冲突消失即恢复唯一归属，裁决可用「撤销最近操作」恢复。</div>
+        <ul id="rulingList" class="ruling-list">
+          <li class="ruling-empty">（暂无多人共有的冲突称呼）</li>
+        </ul>
+
         <h2 class="sub-title">敏感信息巡检</h2>
         <div class="hint sub-hint">离线扫描原稿中的手机号、邮箱与 18 位身份证号（身份证校验出生日期与校验位；重叠时身份证＞邮箱＞手机号，同类更长优先）。状态随规则、框选与例外实时重算。</div>
         <div id="inspectFilters" class="inspect-filters"></div>

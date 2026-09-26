@@ -5,11 +5,14 @@
  * 2. 保留原文例外：按原稿字符区间记录，区间内原文照录，并屏蔽与之重叠的所有自动称呼命中；
  *    显式框选仍可切开、覆盖例外；
  * 3. 最长称呼优先：称呼命中之间发生重叠时，更长的称呼优先，长度相同则先出现者优先；
- * 4. 原稿永不改动：匿名结果只体现在预览中，同时维护双向字符区间映射。
+ * 4. 共享称呼裁决：同一称呼登记在多位人物名下时，必须在侧栏裁决给唯一归属人物，
+ *    未裁决的共享称呼不参与自动替换（不再由人物列表顺序暗中决定代号）；
+ *    人物删除 / 合并使候选集合变化时，失效裁决被清除，冲突消失则称呼恢复唯一归属；
+ * 5. 原稿永不改动：匿名结果只体现在预览中，同时维护双向字符区间映射。
  *
- * 标记例外、恢复匿名、添加/删除/合并人物、框选、批量同文指派均进入同一个撤销栈；
- * 合并人物为原子操作：一次入栈，撤销时按原 ID、列表位置、称呼与全部关联区间精确恢复；
- * 批量同文指派同样整批一条记录：撤销即恢复操作前的区间集合与匿名预览。
+ * 标记例外、恢复匿名、添加/删除/合并人物、框选、批量同文指派、共享称呼裁决均进入
+ * 同一个撤销栈；合并人物为原子操作：一次入栈，撤销时按原 ID、列表位置、称呼与全部
+ * 关联区间（连同裁决）精确恢复；批量同文指派同样整批一条记录。
  */
 (function () {
   'use strict';
@@ -20,7 +23,8 @@
     persons: [],       // { id, codename, aliases:[], color }
     selections: [],    // { id, start, end, personId } 显式框选
     exceptions: [],    // { id, start, end, personId } 保留原文例外
-    history: [],       // 撤销栈：person / selection / exception / restore / removePerson / mergePerson / batchAssign / inspectAssign
+    rulings: {},       // 共享称呼裁决 { [alias]: personId }（仅对多人物共有的称呼生效）
+    history: [],       // 撤销栈：person / selection / exception / restore / removePerson / mergePerson / batchAssign / inspectAssign / ruling
     currentPreview: '',
     currentMap: [],    // { id, kind, oStart, oEnd, pStart, pEnd, personId, explicit, exId }
     candidates: [],    // 敏感信息巡检候选（随原稿一次性离线扫描，detectSensitive 结果）
@@ -43,6 +47,7 @@
   var personForm = $('personForm'), codenameInput = $('codenameInput'), aliasesInput = $('aliasesInput');
   var personList = $('personList'), exceptionList = $('exceptionList'), statsEl = $('stats');
   var inspectFilters = $('inspectFilters'), inspectList = $('inspectList');
+  var rulingList = $('rulingList');
   var mappingBody = document.querySelector('#mappingTable tbody');
   var selPopup = $('selPopup'), popupPerson = $('popupPerson'), popupNewFields = $('popupNewFields');
   var popupCodename = $('popupCodename'), popupAlias = $('popupAlias');
@@ -80,9 +85,72 @@
     return null;
   }
 
+  // ---------- 共享称呼裁决 ----------
+  // 计算当前有冲突的称呼（同一称呼登记在多位人物名下）及其候选人物，保留首次登记顺序。
+  // 每项：{ alias, owners:[person,...], hits, chosenId|null }（hits 为原稿命中数）
+  function computeConflicts() {
+    var owners = Anonymizer.aliasOwners(state.persons);
+    var out = [];
+    Object.keys(owners).forEach(function (alias) {
+      var ids = owners[alias];
+      if (ids.length < 2) return;
+      var people = ids.map(personById).filter(Boolean);
+      var count = 0, pos = state.text.indexOf(alias);
+      while (pos !== -1) { count++; pos = state.text.indexOf(alias, pos + alias.length); }
+      var chosenId = state.rulings[alias];
+      out.push({
+        alias: alias,
+        owners: people,
+        hits: count,
+        chosenId: people.some(function (p) { return p.id === chosenId; }) ? chosenId : null
+      });
+    });
+    // 未裁决优先，其次原稿命中数多者，再次首次登记顺序
+    out.sort(function (a, b) {
+      return (a.chosenId === null ? 0 : 1) - (b.chosenId === null ? 0 : 1) ||
+        b.hits - a.hits;
+    });
+    return out;
+  }
+
+  // 清除失效裁决：归属人物已不存在、或该称呼已不再是多位人物共有时移除。
+  // 在每次渲染前归一化，使人物删除 / 合并（含撤销恢复）后候选集合变化自动收敛。
+  function normalizeRulings() {
+    var owners = Anonymizer.aliasOwners(state.persons);
+    Object.keys(state.rulings).forEach(function (alias) {
+      var ids = owners[alias];
+      var valid = ids && ids.length > 1 && ids.indexOf(state.rulings[alias]) !== -1;
+      if (!valid) delete state.rulings[alias];
+    });
+  }
+
+  function snapshotRulings() {
+    return Object.assign({}, state.rulings);
+  }
+
+  function ruleAlias(alias, personId) {
+    var conflicts = computeConflicts();
+    var conflict = conflicts.filter(function (c) { return c.alias === alias; })[0];
+    var person = personById(personId);
+    if (!conflict || !person || conflict.owners.indexOf(person) === -1) return;
+    if (conflict.chosenId === personId) return; // 已裁决给该人物：无变化，不入撤销栈
+    var before = snapshotRulings();
+    state.rulings[alias] = personId;
+    state.history.push({
+      type: 'ruling',
+      alias: alias,
+      personId: personId,
+      before: before // 操作前完整裁决快照：撤销即恢复，包含覆盖旧裁决的情形
+    });
+    render();
+    toast('共享称呼「' + alias + '」已裁决给「' + person.codename + '」，自动命中已重算，可撤销');
+  }
+
   // ---------- 匿名化引擎（public/anonymize.js，纯函数） ----------
   function anonymize() {
-    return Anonymizer.anonymize(state.text, state.persons, state.selections, state.exceptions);
+    normalizeRulings();
+    return Anonymizer.anonymize(
+      state.text, state.persons, state.selections, state.exceptions, state.rulings);
   }
 
   // ---------- 渲染 ----------
@@ -216,6 +284,7 @@
     renderView(originalView, state.text, oIntervals, oMarks);
     renderView(previewView, result.preview, pIntervals, pMarks);
     renderPersons();
+    renderRulings();
     renderInspect();
     renderExceptions(activeExIds);
     renderMapping(result.map);
@@ -270,6 +339,67 @@
       }
       li.appendChild(tags);
       personList.appendChild(li);
+    });
+  }
+
+  // ---------- 共享称呼裁决侧栏 ----------
+  function renderRulings() {
+    rulingList.innerHTML = '';
+    var conflicts = computeConflicts();
+    if (!conflicts.length) {
+      var none = document.createElement('li');
+      none.className = 'ruling-empty';
+      none.textContent = '（暂无多人共有的冲突称呼）';
+      rulingList.appendChild(none);
+      return;
+    }
+    conflicts.forEach(function (c) {
+      var li = document.createElement('li');
+      li.className = 'ruling-item' + (c.chosenId === null ? ' unresolved' : '');
+
+      var row = document.createElement('div');
+      row.className = 'ruling-row';
+      var alias = document.createElement('span');
+      alias.className = 'ruling-alias';
+      alias.textContent = c.alias;
+      var hit = document.createElement('span');
+      hit.className = 'ruling-hits';
+      hit.textContent = '原稿命中 ' + c.hits + ' 处';
+      var st = document.createElement('span');
+      st.className = 'ruling-status';
+      st.textContent = c.chosenId === null ? '未裁决·不替换' : '已裁决';
+      row.appendChild(alias); row.appendChild(hit); row.appendChild(st);
+      li.appendChild(row);
+
+      var cand = document.createElement('div');
+      cand.className = 'ruling-candidates';
+      c.owners.forEach(function (p) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ruling-choice' + (c.chosenId === p.id ? ' on' : '');
+        btn.textContent = p.codename;
+        btn.title = '把共享称呼「' + c.alias + '」的自动命中裁决给「' + p.codename + '」（可撤销）';
+        btn.addEventListener('click', function () { ruleAlias(c.alias, p.id); });
+        cand.appendChild(btn);
+      });
+      li.appendChild(cand);
+
+      // 已裁决后点击称呼可在原稿 / 预览中定位其首个自动命中；未裁决时该称呼不产生命中
+      if (c.chosenId !== null) {
+        alias.classList.add('locatable');
+        alias.title = '点击在原稿 / 预览中定位首个自动命中';
+        alias.addEventListener('click', function () {
+          var pos = state.text.indexOf(c.alias);
+          if (pos === -1) return;
+          var m = state.currentMap.find(function (mm) {
+            return mm.kind === 'replace' && mm.oStart === pos && mm.oEnd === pos + c.alias.length;
+          }) || state.currentMap.find(function (mm) {
+            return pos < mm.oEnd && pos + c.alias.length > mm.oStart;
+          });
+          if (m) activate(m.id, true);
+        });
+      }
+      rulingList.appendChild(li);
     });
   }
 
@@ -556,6 +686,12 @@
       stats += ' ｜ 例外 ' + state.exceptions.length + ' 条';
       if (covered) stats += '（其中 ' + covered + ' 条被框选完全覆盖）';
     }
+    var conflicts = computeConflicts();
+    if (conflicts.length) {
+      var unresolved = conflicts.filter(function (c) { return c.chosenId === null; }).length;
+      stats += ' ｜ 冲突称呼 ' + conflicts.length + ' 个';
+      if (unresolved) stats += '（' + unresolved + ' 个未裁决，暂不自动替换）';
+    }
     if (state.inspect.length) {
       var leakN = state.inspect.filter(function (c) { return c.status === 'leaking'; }).length;
       var keptN = state.inspect.filter(function (c) { return c.status === 'kept'; }).length;
@@ -740,7 +876,9 @@
 
   function addPerson(codename, aliases, recordHistory) {
     var person = createPerson(codename, aliases);
-    if (recordHistory !== false) state.history.push({ type: 'person', person: person });
+    if (recordHistory !== false) {
+      state.history.push({ type: 'person', person: person, rulingsBefore: snapshotRulings() });
+    }
     render();
     return person;
   }
@@ -763,12 +901,13 @@
     state.persons = state.persons.filter(function (p) { return p.id !== id; });
     state.selections = state.selections.filter(function (s) { return s.personId !== id; });
     state.exceptions = state.exceptions.filter(function (x) { return x.personId !== id; });
-    // 人物删除进入撤销栈（连同其框选与例外一起恢复）
+    // 人物删除进入撤销栈（连同其框选、例外与裁决快照一起恢复）
     state.history.push({
       type: 'removePerson',
       person: person,
       selections: removedSels,
-      exceptions: removedExs
+      exceptions: removedExs,
+      rulingsBefore: snapshotRulings()
     });
     render();
     toast('已删除人物「' + person.codename + '」，可撤销');
@@ -853,6 +992,12 @@
     // 保留对象引用：撤销时按引用把 personId 改回源人物
     var movedSels = state.selections.filter(function (s) { return s.personId === sourceId; });
     var movedExs = state.exceptions.filter(function (x) { return x.personId === sourceId; });
+    // 裁决先于删除做快照：源人物作为候选的裁决先改指向目标人物（合并后源已不存在），
+    // 归一化时再清除因候选集合变化而失效（冲突消失 / 归属改变）的裁决。
+    var rulingsBefore = snapshotRulings();
+    Object.keys(state.rulings).forEach(function (alias) {
+      if (state.rulings[alias] === sourceId) state.rulings[alias] = targetId;
+    });
 
     target.aliases = dedupAliases(target, source);
     movedSels.forEach(function (s) { s.personId = targetId; });
@@ -867,7 +1012,8 @@
       source: source,
       sourceIndex: sourceIndex,
       selections: movedSels,
-      exceptions: movedExs
+      exceptions: movedExs,
+      rulingsBefore: rulingsBefore
     });
     render();
     toast('已将「' + source.codename + '」合并进「' + target.codename + '」，可撤销');
@@ -956,7 +1102,12 @@
       return sel;
     });
     // 整批变更作为一条撤销记录
-    state.history.push({ type: 'batchAssign', person: person, selections: added });
+    state.history.push({
+      type: 'batchAssign',
+      person: person,
+      selections: added,
+      rulingsBefore: snapshotRulings()
+    });
     closeBatchDialog();
     window.getSelection().removeAllRanges();
     closePopup();
@@ -969,11 +1120,17 @@
   function undo() {
     var action = state.history.pop();
     if (!action) return;
+    function restoreRulingsSnapshot(rec) {
+      // 各操作入栈时保存操作前的裁决快照；恢复后由渲染前的归一化再做一次兜底清理
+      if (rec.rulingsBefore !== undefined) state.rulings = Object.assign({}, rec.rulingsBefore);
+    }
+    var rulingToast = null;
     switch (action.type) {
       case 'person':
         state.persons = state.persons.filter(function (p) { return p.id !== action.person.id; });
         state.selections = state.selections.filter(function (s) { return s.personId !== action.person.id; });
         state.exceptions = state.exceptions.filter(function (x) { return x.personId !== action.person.id; });
+        restoreRulingsSnapshot(action);
         toast('已撤销人物「' + action.person.codename + '」');
         break;
       case 'selection':
@@ -992,6 +1149,7 @@
         state.persons.push(action.person);
         state.selections = state.selections.concat(action.selections);
         state.exceptions = state.exceptions.concat(action.exceptions);
+        restoreRulingsSnapshot(action);
         toast('已恢复人物「' + action.person.codename + '」及其规则');
         break;
       case 'mergePerson':
@@ -1001,6 +1159,7 @@
         action.selections.forEach(function (s) { s.personId = action.source.id; });
         action.exceptions.forEach(function (x) { x.personId = action.source.id; });
         state.persons.splice(Math.min(action.sourceIndex, state.persons.length), 0, action.source);
+        restoreRulingsSnapshot(action);
         toast('已撤销合并，恢复人物「' + action.source.codename + '」');
         break;
       case 'batchAssign':
@@ -1014,6 +1173,7 @@
           state.selections = state.selections.filter(function (s) { return s.personId !== action.person.id; });
           state.exceptions = state.exceptions.filter(function (x) { return x.personId !== action.person.id; });
         }
+        restoreRulingsSnapshot(action);
         toast('已撤销批量同文指派（' + action.selections.length + ' 处）');
         break;
       case 'inspectAssign':
@@ -1023,8 +1183,14 @@
         state.selections = state.selections.filter(function (s) { return !iaIds[s.id]; });
         toast('已撤销敏感信息指派（' + action.selections.length + ' 段）');
         break;
+      case 'ruling':
+        // 裁决撤销：恢复操作前的完整裁决集合（含此前的旧裁决），预览与巡检随之重算
+        state.rulings = Object.assign({}, action.before);
+        rulingToast = '已撤销对共享称呼「' + action.alias + '」的裁决';
+        break;
     }
     render();
+    if (rulingToast) toast(rulingToast);
   }
 
   // ---------- 框选 ----------
@@ -1180,6 +1346,7 @@
     state.persons = [];
     state.selections = [];
     state.exceptions = [];
+    state.rulings = {};
     state.history = [];
     state.citations = []; // 重新加载原稿时清空引文
     state.candidates = Anonymizer.detectSensitive(text); // 离线一次性扫描，随规则变化只重判级
@@ -1210,6 +1377,7 @@
     state.persons = [];
     state.selections = [];
     state.exceptions = [];
+    state.rulings = {};
     state.history = [];
     state.citations = []; // 重新加载原稿时清空引文
     state.candidates = [];
