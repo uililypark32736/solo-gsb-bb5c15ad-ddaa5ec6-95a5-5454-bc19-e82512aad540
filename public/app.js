@@ -7,7 +7,12 @@
  * 3. 最长称呼优先：称呼命中之间发生重叠时，更长的称呼优先，长度相同则先出现者优先；
  * 4. 原稿永不改动：匿名结果只体现在预览中，同时维护双向字符区间映射。
  *
- * 标记例外、恢复匿名、添加/删除/合并人物、框选、批量同文指派均进入同一个撤销栈；
+ * 共享称呼裁决：同一称呼登记在多位人物名下时即构成冲突，未裁决的冲突称呼不参与自动
+ * 替换（不再由人物列表顺序暗中决定代号）；在侧栏为冲突称呼选定归属人物后，其命中按
+ * 上述既有优先级进入匿名预览与区间映射，巡检状态与引文随之重算。人物删除/合并导致
+ * 候选集合变化时，失效裁决自动清除；冲突消失（仅剩一位候选）即恢复唯一归属、自动参与
+ * 替换。每次裁决（含改选、取消）与标记例外、恢复匿名、添加/删除/合并人物、框选、
+ * 批量同文指派一样进入同一个撤销栈；
  * 合并人物为原子操作：一次入栈，撤销时按原 ID、列表位置、称呼与全部关联区间精确恢复；
  * 批量同文指派同样整批一条记录：撤销即恢复操作前的区间集合与匿名预览。
  */
@@ -20,13 +25,15 @@
     persons: [],       // { id, codename, aliases:[], color }
     selections: [],    // { id, start, end, personId } 显式框选
     exceptions: [],    // { id, start, end, personId } 保留原文例外
-    history: [],       // 撤销栈：person / selection / exception / restore / removePerson / mergePerson / batchAssign / inspectAssign
+    history: [],       // 撤销栈：person / selection / exception / restore / removePerson / mergePerson / batchAssign / inspectAssign / resolveAlias
     currentPreview: '',
     currentMap: [],    // { id, kind, oStart, oEnd, pStart, pEnd, personId, explicit, exId }
     candidates: [],    // 敏感信息巡检候选（随原稿一次性离线扫描，detectSensitive 结果）
     inspect: [],       // 候选依据最新映射判定后的结果（每次渲染重算，含 cid/status/leakRanges）
     inspectFilter: 'all', // 巡检侧栏状态筛选：all / leaking / kept / anonymized
-    citations: []      // 引文：{ id, start, end } 原稿非空半开区间（按添加顺序），引文正文每次渲染重算
+    citations: [],     // 引文：{ id, start, end } 原稿非空半开区间（按添加顺序），引文正文每次渲染重算
+    sharedAliases: [], // 共享称呼冲突（每次渲染由 detectSharedAliases 重算）：{ alias, personIds, hits }
+    resolutions: Object.create(null) // 共享称呼裁决表：称呼 -> 归属人物 id（无原型键，避免特殊称呼串干扰）
   };
   var personSeq = 1;
   var selSeq = 1;
@@ -42,6 +49,7 @@
   var originalView = $('originalView'), previewView = $('previewView');
   var personForm = $('personForm'), codenameInput = $('codenameInput'), aliasesInput = $('aliasesInput');
   var personList = $('personList'), exceptionList = $('exceptionList'), statsEl = $('stats');
+  var sharedList = $('sharedList');
   var inspectFilters = $('inspectFilters'), inspectList = $('inspectList');
   var mappingBody = document.querySelector('#mappingTable tbody');
   var selPopup = $('selPopup'), popupPerson = $('popupPerson'), popupNewFields = $('popupNewFields');
@@ -82,7 +90,7 @@
 
   // ---------- 匿名化引擎（public/anonymize.js，纯函数） ----------
   function anonymize() {
-    return Anonymizer.anonymize(state.text, state.persons, state.selections, state.exceptions);
+    return Anonymizer.anonymize(state.text, state.persons, state.selections, state.exceptions, state.resolutions);
   }
 
   // ---------- 渲染 ----------
@@ -187,6 +195,7 @@
   }
 
   function render() {
+    computeShared(); // 先重算共享称呼冲突并清理失效裁决，再进入匿名化
     var result = anonymize();
     state.currentPreview = result.preview;
     state.currentMap = result.map;
@@ -216,6 +225,7 @@
     renderView(originalView, state.text, oIntervals, oMarks);
     renderView(previewView, result.preview, pIntervals, pMarks);
     renderPersons();
+    renderShared();
     renderInspect();
     renderExceptions(activeExIds);
     renderMapping(result.map);
@@ -270,6 +280,111 @@
       }
       li.appendChild(tags);
       personList.appendChild(li);
+    });
+  }
+
+  // ---------- 共享称呼裁决 ----------
+  // 同一称呼登记在多位人物名下即冲突：未裁决的冲突称呼不参与自动替换（不再由人物
+  // 列表顺序暗中决定代号）；裁决后归属人物的命中按既有优先级（框选 ＞ 例外 ＞ 最长
+  // 称呼）进入预览与映射。每次渲染重算冲突集合，并清除失效裁决：归属人物已不在候选
+  // 集合中（人物删除/合并），或冲突已消失（仅剩一位候选，恢复唯一归属、自动参与替换）。
+  function computeShared() {
+    state.sharedAliases = Anonymizer.detectSharedAliases(state.text, state.persons);
+    var ownerSets = Object.create(null);
+    state.sharedAliases.forEach(function (c) { ownerSets[c.alias] = c.personIds; });
+    Object.keys(state.resolutions).forEach(function (alias) {
+      var owners = ownerSets[alias];
+      if (!owners || owners.indexOf(state.resolutions[alias]) === -1) {
+        delete state.resolutions[alias]; // 失效裁决：冲突消失或归属人物已退出候选集合
+      }
+    });
+  }
+
+  function resolutionOf(alias) {
+    return Object.prototype.hasOwnProperty.call(state.resolutions, alias)
+      ? state.resolutions[alias] : null;
+  }
+
+  // 为冲突称呼选定归属人物（personId 为 null 表示取消裁决、恢复不参与自动替换）
+  function resolveAlias(alias, personId) {
+    var conflict = state.sharedAliases.filter(function (c) { return c.alias === alias; })[0];
+    if (!conflict) return;
+    if (personId != null && conflict.personIds.indexOf(personId) === -1) return;
+    var prev = resolutionOf(alias);
+    if (prev === personId) return;
+    if (personId == null) delete state.resolutions[alias];
+    else state.resolutions[alias] = personId;
+    // 裁决（含改选、取消）作为一条记录进入撤销栈
+    state.history.push({ type: 'resolveAlias', alias: alias, prev: prev, next: personId });
+    render();
+    if (personId == null) {
+      toast('已取消称呼「' + alias + '」的裁决，该称呼暂不参与自动替换，可撤销');
+    } else {
+      var p = personById(personId);
+      toast('已将称呼「' + alias + '」裁决给「' + (p ? p.codename : '?') + '」，可撤销');
+    }
+  }
+
+  function renderShared() {
+    sharedList.innerHTML = '';
+    if (!state.sharedAliases.length) {
+      var empty = document.createElement('li');
+      empty.className = 'shared-empty';
+      empty.textContent = '（暂无共享称呼冲突）';
+      sharedList.appendChild(empty);
+      return;
+    }
+    state.sharedAliases.forEach(function (c) {
+      var resolvedId = resolutionOf(c.alias);
+      var li = document.createElement('li');
+      li.className = 'shared-item ' + (resolvedId == null ? 'shared-pending' : 'shared-resolved');
+
+      var row = document.createElement('div');
+      row.className = 'shared-row';
+      var aliasEl = document.createElement('span');
+      aliasEl.className = 'shared-alias';
+      aliasEl.textContent = c.alias;
+      aliasEl.title = c.alias;
+      var hits = document.createElement('span');
+      hits.className = 'shared-hits';
+      hits.textContent = '原稿命中 ' + c.hits + ' 处';
+      row.appendChild(aliasEl);
+      row.appendChild(hits);
+      li.appendChild(row);
+
+      // 候选人物下拉：占位项为「未裁决」，其余为各候选人物代号
+      var select = document.createElement('select');
+      select.className = 'shared-select';
+      var o0 = document.createElement('option');
+      o0.value = '';
+      o0.textContent = '（未裁决：不参与自动替换）';
+      select.appendChild(o0);
+      c.personIds.forEach(function (pid) {
+        var p = personById(pid);
+        if (!p) return;
+        var o = document.createElement('option');
+        o.value = pid;
+        o.textContent = '归属：' + p.codename;
+        select.appendChild(o);
+      });
+      select.value = resolvedId == null ? '' : String(resolvedId);
+      select.addEventListener('change', function () {
+        resolveAlias(c.alias, select.value === '' ? null : Number(select.value));
+      });
+      li.appendChild(select);
+
+      var meta = document.createElement('div');
+      meta.className = 'shared-meta';
+      if (resolvedId == null) {
+        meta.textContent = '待裁决：该称呼的命中暂不替换，人物顺序不再暗中决定归属';
+      } else {
+        var rp = personById(resolvedId);
+        meta.textContent = '已归属「' + (rp ? rp.codename : '?') +
+          '」，命中按既有优先级进入预览与映射';
+      }
+      li.appendChild(meta);
+
+      sharedList.appendChild(li);
     });
   }
 
@@ -552,6 +667,12 @@
       }).length;
     var stats = '人物 ' + state.persons.length + ' 位 ｜ 共处理 ' + map.length +
       ' 处（框选 ' + explicit + ' · 称呼 ' + aliases + ' · 保留原文 ' + keeps + '）';
+    if (state.sharedAliases.length) {
+      var pendingShared = state.sharedAliases.filter(function (c) {
+        return resolutionOf(c.alias) == null;
+      }).length;
+      stats += ' ｜ 共享称呼 ' + state.sharedAliases.length + ' 个（待裁决 ' + pendingShared + '）';
+    }
     if (state.exceptions.length) {
       stats += ' ｜ 例外 ' + state.exceptions.length + ' 条';
       if (covered) stats += '（其中 ' + covered + ' 条被框选完全覆盖）';
@@ -1023,6 +1144,12 @@
         state.selections = state.selections.filter(function (s) { return !iaIds[s.id]; });
         toast('已撤销敏感信息指派（' + action.selections.length + ' 段）');
         break;
+      case 'resolveAlias':
+        // 共享称呼裁决的撤销：恢复裁决前的归属（原先未裁决则删除该裁决）
+        if (action.prev == null) delete state.resolutions[action.alias];
+        else state.resolutions[action.alias] = action.prev;
+        toast('已撤销称呼「' + action.alias + '」的裁决');
+        break;
     }
     render();
   }
@@ -1182,6 +1309,8 @@
     state.exceptions = [];
     state.history = [];
     state.citations = []; // 重新加载原稿时清空引文
+    state.sharedAliases = [];
+    state.resolutions = Object.create(null); // 重新加载原稿时清空共享称呼裁决
     state.candidates = Anonymizer.detectSensitive(text); // 离线一次性扫描，随规则变化只重判级
     state.inspect = [];
     state.inspectFilter = 'all';
@@ -1212,6 +1341,8 @@
     state.exceptions = [];
     state.history = [];
     state.citations = []; // 重新加载原稿时清空引文
+    state.sharedAliases = [];
+    state.resolutions = Object.create(null);
     state.candidates = [];
     state.inspect = [];
     state.inspectFilter = 'all';

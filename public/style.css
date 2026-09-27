@@ -224,6 +224,51 @@ body {
 
 .stats { margin-top: 12px; font-size: 12px; color: #4a5568; border-top: 1px dashed #e1e6ec; padding-top: 10px; }
 
+/* 共享称呼裁决 */
+.shared-list {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.shared-item {
+  border: 1px solid #e1e6ec;
+  border-left: 3px solid #b0b8c0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12.5px;
+}
+.shared-item.shared-pending { border-left-color: #9a6700; }
+.shared-item.shared-resolved { border-left-color: #1a7f37; }
+.shared-row { display: flex; align-items: center; gap: 8px; }
+.shared-alias {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shared-item.shared-pending .shared-alias { color: #9a6700; }
+.shared-item.shared-resolved .shared-alias { color: #1a7f37; }
+.shared-hits { flex: none; font-size: 11.5px; color: #8a94a0; }
+.shared-select {
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid #d0d7de;
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  background: #fff;
+}
+.shared-item.shared-pending .shared-select { border-color: #d4a72c; }
+.shared-meta { margin-top: 4px; font-size: 11.5px; color: #8a94a0; }
+.shared-empty { font-size: 12px; color: #a0a8b0; list-style: none; }
+
 /* 敏感信息巡检 */
 .inspect-filters { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
 .inspect-filter {

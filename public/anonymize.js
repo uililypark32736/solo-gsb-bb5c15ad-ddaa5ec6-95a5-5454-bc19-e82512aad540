@@ -1,6 +1,9 @@
 /* 匿名化引擎（纯函数，浏览器与 Node 共用）
  *
  * 规则（优先级从高到低）：
+ * 0. 共享称呼裁决门控：同一称呼登记在多位人物名下时，未经裁决（resolutions 未指定
+ *    归属人物）该称呼不参与自动替换，不再由人物列表顺序暗中决定代号；
+ *    裁决后仅归属人物的该称呼命中进入下列竞争；
  * 1. 显式框选优先：框选片段占据其字符区间，称呼命中、保留原文例外与之重叠时均让位；
  * 2. 保留原文例外：按原稿字符区间记录，区间内（扣除被显式框选覆盖的部分）原文照录，
  *    并屏蔽与之重叠的所有自动称呼命中；
@@ -45,13 +48,17 @@
    * @param {Array} persons [{ id, codename, aliases: [] }]
    * @param {Array} selections [{ start, end, personId }] 显式框选（最高优先级）
    * @param {Array} exceptions [{ id, start, end, personId }] 保留原文例外（来源人物）
+   * @param {Object} [resolutions] 共享称呼裁决表 { 称呼: personId }：同一称呼登记在
+   *   多位人物名下时，仅当裁决表把该称呼指给某人物，该人物的此称呼命中才参与替换；
+   *   未裁决的共享称呼一律不参与自动替换
    * @returns {{ preview: string, map: Array }} 预览文本与双向区间映射
    *   map 项: { id, kind:'replace'|'keep', oStart, oEnd, pStart, pEnd,
    *             personId, explicit, exId }
    */
-  function anonymize(text, persons, selections, exceptions) {
+  function anonymize(text, persons, selections, exceptions, resolutions) {
     selections = selections || [];
     exceptions = exceptions || [];
+    resolutions = resolutions || {};
     var byId = {};
     persons.forEach(function (p) { byId[p.id] = p; });
 
@@ -79,10 +86,27 @@
     });
 
     // 3) 收集所有称呼命中
+    // 共享称呼（同一称呼登记在多位人物名下）：未经裁决不参与自动替换；
+    // 裁决后仅归属人物的该称呼命中生效，仍按最长称呼优先等既有规则竞争
+    var owners = Object.create(null); // 称呼 -> [personId,...]（按人物顺序，同人重复登记去重）
+    persons.forEach(function (p) {
+      p.aliases.forEach(function (alias) {
+        if (!alias) return;
+        var list = owners[alias];
+        if (!list) list = owners[alias] = [];
+        if (list.indexOf(p.id) === -1) list.push(p.id);
+      });
+    });
+
     var hits = [];
     persons.forEach(function (p) {
       p.aliases.forEach(function (alias) {
         if (!alias) return;
+        if (owners[alias].length > 1) {
+          var resolved = Object.prototype.hasOwnProperty.call(resolutions, alias)
+            ? resolutions[alias] : null;
+          if (resolved !== p.id) return; // 未裁决或裁决给他人：该称呼此处不命中
+        }
         var i = text.indexOf(alias);
         while (i !== -1) {
           hits.push({ start: i, end: i + alias.length, personId: p.id });
@@ -216,6 +240,40 @@
     return result;
   }
 
+  /**
+   * 检测共享称呼冲突：同一非空称呼登记在两位及以上人物名下即构成冲突。
+   * 返回每个冲突称呼、候选人物 id 列表（按人物列表顺序，同人重复登记只算一次）
+   * 与原稿命中数（命中统计与 anonymize 的称呼扫描同款：indexOf 逐位步进，允许重叠计数）。
+   *
+   * @param {string} text 原稿
+   * @param {Array} persons [{ id, codename, aliases: [] }]
+   * @returns {Array<{ alias: string, personIds: Array, hits: number }>}
+   *   按称呼首次出现的人物列表顺序排列
+   */
+  function detectSharedAliases(text, persons) {
+    text = text || '';
+    var owners = Object.create(null); // 称呼 -> [personId,...]
+    var order = [];
+    (persons || []).forEach(function (p) {
+      (p.aliases || []).forEach(function (alias) {
+        if (!alias) return;
+        var list = owners[alias];
+        if (!list) { list = owners[alias] = []; order.push(alias); }
+        if (list.indexOf(p.id) === -1) list.push(p.id);
+      });
+    });
+    var out = [];
+    order.forEach(function (alias) {
+      var personIds = owners[alias];
+      if (personIds.length < 2) return;
+      var hits = 0;
+      var i = text.indexOf(alias);
+      while (i !== -1) { hits++; i = text.indexOf(alias, i + 1); }
+      out.push({ alias: alias, personIds: personIds.slice(), hits: hits });
+    });
+    return out;
+  }
+
   // ================= 敏感信息巡检（离线识别，纯函数） =================
   var ID_WEIGHTS = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
   var ID_CHECK_CODES = '10X98765432'; // 加权和 mod 11 后的校验码（含末位 X）
@@ -346,6 +404,7 @@
     anonymize: anonymize,
     buildCitation: buildCitation,
     planBatchAssign: planBatchAssign,
+    detectSharedAliases: detectSharedAliases,
     detectSensitive: detectSensitive,
     classifyCandidates: classifyCandidates
   };
